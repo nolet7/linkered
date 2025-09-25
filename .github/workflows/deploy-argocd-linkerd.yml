@@ -35,7 +35,7 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          install_components: true
+          version: '>= 475.0.0'
 
       - name: Auth with service account
         uses: google-github-actions/auth@v2
