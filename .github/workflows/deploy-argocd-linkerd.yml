@@ -27,32 +27,35 @@ jobs:
     permissions:
       contents: write
       id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup gcloud (with components)
+      - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           install_components: true
-          components: gke-gcloud-auth-plugin
 
       - name: Auth with service account
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
+      - name: Install GKE auth plugin
+        run: gcloud components install gke-gcloud-auth-plugin -q
+
       - name: Get GKE credentials
         run: |
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
           gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
 
-      # DEV ONLY: generate certs and WRITE the values file (no sed replacements)
+      # DEV ONLY: generate certs and WRITE the values file safely (no sed on PEM)
       - name: Generate DEV identity certs (trust anchor + issuer) and write values
         if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
         run: |
           mkdir -p /tmp/linkerd-dev
-          # Trust anchor (self-signed)
+          # Trust anchor
           openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
             -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
             -subj "/CN=linkerd-trust-anchor.dev"
@@ -64,7 +67,6 @@ jobs:
             -CA /tmp/linkerd-dev/trust-anchor.crt -CAkey /tmp/linkerd-dev/ca.key -CAcreateserial \
             -out /tmp/linkerd-dev/issuer.crt -days 3650
 
-          # Recreate the dev values file embedding PEMs safely
           mkdir -p helm-values/dev
           {
             printf "%s\n" "installNamespace: false"
@@ -107,7 +109,6 @@ jobs:
           kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
           kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
 
-      # STAGING/PROD: choose secrets without using upper()
       - name: Deploy STAGING/PROD apps (inline values from secrets)
         if: ${{ (github.event.inputs.environment || 'dev') != 'dev' }}
         env:
@@ -150,7 +151,7 @@ jobs:
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-crds-${ENV}.yaml
           kubectl apply -f /tmp/linkerd-crds-${ENV}.yaml
 
-          # Control plane with external CA and inline trust anchor (issuer Secret provided by certs/secrets in cluster)
+          # Control plane (inline PEMs; no secrets committed)
           cat > /tmp/linkerd-control-plane-${ENV}.yaml <<APP
           apiVersion: argoproj.io/v1alpha1
           kind: Application
