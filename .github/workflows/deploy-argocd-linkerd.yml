@@ -32,6 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # gcloud + auth
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -50,12 +51,12 @@ jobs:
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
           gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
 
-      # DEV ONLY: generate certs and WRITE the values file safely (no sed on PEM)
-      - name: Generate DEV identity certs (trust anchor + issuer) and write values
+      # ---------- DEV: generate certs and write values file ----------
+      - name: Generate DEV identity certs and write values
         if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
         run: |
           mkdir -p /tmp/linkerd-dev
-          # Trust anchor
+          # Trust anchor (self-signed)
           openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
             -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
             -subj "/CN=linkerd-trust-anchor.dev"
@@ -99,17 +100,16 @@ jobs:
             git push origin "$DEFAULT_BRANCH"
           fi
 
-      - name: Apply Argo CD Project
-        run: kubectl apply -f argocd/project-platform-tools.yaml
-
-      - name: Deploy DEV apps
-        if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
+      # ---------- Apply Argo CD objects ----------
+      - name: Apply Argo CD Project & Apps (dev scaffolds)
         run: |
+          kubectl apply -f argocd/project-platform-tools.yaml
           kubectl apply -f argocd/apps/linkerd-crds-dev.yaml
           kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
           kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
 
-      - name: Deploy STAGING/PROD apps (inline values from secrets)
+      # ---------- STAGING/PROD: create Apps with inline secrets ----------
+      - name: Create STAGING/PROD Apps with inline PEMs
         if: ${{ (github.event.inputs.environment || 'dev') != 'dev' }}
         env:
           ENV: ${{ github.event.inputs.environment }}
@@ -125,7 +125,6 @@ jobs:
             prod)    TRUST_ANCHOR="$PROD_TA";    ISSUER_CERT="$PROD_CERT";    ISSUER_KEY="$PROD_KEY"    ;;
             *) echo "ENV must be staging or prod"; exit 1 ;;
           esac
-
           if [ -z "$TRUST_ANCHOR" ] || [ -z "$ISSUER_CERT" ] || [ -z "$ISSUER_KEY" ]; then
             echo "Missing secrets for $ENV"; exit 1
           fi
@@ -134,7 +133,9 @@ jobs:
           cat > /tmp/linkerd-crds-${ENV}.yaml <<'APP'
           apiVersion: argoproj.io/v1alpha1
           kind: Application
-          metadata: { name: linkerd-crds-__ENV__, namespace: argocd }
+          metadata:
+            name: linkerd-crds-__ENV__
+            namespace: argocd
           spec:
             project: platform-tools
             source:
@@ -151,11 +152,13 @@ jobs:
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-crds-${ENV}.yaml
           kubectl apply -f /tmp/linkerd-crds-${ENV}.yaml
 
-          # Control plane (inline PEMs; no secrets committed)
+          # Control plane
           cat > /tmp/linkerd-control-plane-${ENV}.yaml <<APP
           apiVersion: argoproj.io/v1alpha1
           kind: Application
-          metadata: { name: linkerd-control-plane-${ENV}, namespace: argocd }
+          metadata:
+            name: linkerd-control-plane-${ENV}
+            namespace: argocd
           spec:
             project: platform-tools
             sources:
@@ -201,7 +204,9 @@ jobs:
           cat > /tmp/linkerd-viz-${ENV}.yaml <<'APP'
           apiVersion: argoproj.io/v1alpha1
           kind: Application
-          metadata: { name: linkerd-viz-__ENV__, namespace: argocd }
+          metadata:
+            name: linkerd-viz-__ENV__
+            namespace: argocd
           spec:
             project: platform-tools
             source:
@@ -213,7 +218,7 @@ jobs:
                   installNamespace: false
             destination:
               server: https://kubernetes.default.svc
-              namespace: linkerd-viz
+            namespace: linkerd-viz
             syncPolicy:
               automated: { selfHeal: true, prune: true }
               syncOptions: [ CreateNamespace=true ]
@@ -221,7 +226,50 @@ jobs:
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-viz-${ENV}.yaml
           kubectl apply -f /tmp/linkerd-viz-${ENV}.yaml
 
-      - name: Quick health (non-blocking)
+      # ---------- Add sync waves + autosync; then trigger syncs ----------
+      - name: Set sync waves and autosync on Apps
         run: |
-          kubectl -n linkerd get deploy || true
-          kubectl -n linkerd get po -o wide || true
+          set -e
+          apps=(linkerd-crds-dev linkerd-control-plane-dev linkerd-viz-dev)
+          # If this is staging/prod run, patch those names instead
+          if [ "${{ github.event.inputs.environment || 'dev' }}" != "dev" ]; then
+            apps=(linkerd-crds-${{ github.event.inputs.environment }} linkerd-control-plane-${{ github.event.inputs.environment }} linkerd-viz-${{ github.event.inputs.environment }})
+          fi
+
+          # Waves: CRDs=-1, control-plane=0, viz=+1
+          kubectl -n argocd patch application "${apps[0]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"-1"}}}'
+          kubectl -n argocd patch application "${apps[1]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"0"}}}'
+          kubectl -n argocd patch application "${apps[2]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"+1"}}}'
+
+          # Ensure auto-sync
+          for a in "${apps[@]}"; do
+            kubectl -n argocd patch application "$a" --type merge -p \
+              '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true},"syncOptions":["CreateNamespace=true"]}}}'
+          done
+
+          # Trigger syncs
+          for a in "${apps[@]}"; do
+            kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}'
+          done
+
+      # ---------- Wait until Linkerd is ready ----------
+      - name: Wait for Linkerd control plane to be Available
+        run: |
+          # Wait for deployments in linkerd ns (best-effort, ignore if ns isn't there yet)
+          kubectl get ns linkerd >/dev/null 2>&1 || { echo "linkerd namespace not created yet"; exit 0; }
+          kubectl -n linkerd get deploy -o name | xargs -r -I{} kubectl -n linkerd wait --for=condition=available --timeout=10m {}
+
+      - name: Wait for Linkerd Viz (optional)
+        run: |
+          kubectl get ns linkerd-viz >/dev/null 2>&1 || { echo "linkerd-viz namespace not created yet"; exit 0; }
+          kubectl -n linkerd-viz get deploy -o name | xargs -r -I{} kubectl -n linkerd-viz wait --for=condition=available --timeout=10m {}
+
+      - name: Show status
+        run: |
+          echo "== Argo CD Applications =="
+          kubectl -n argocd get applications
+          echo "== Linkerd =="
+          kubectl -n linkerd get deploy,po -o wide || true
+          echo "== Linkerd Viz =="
+          kubectl -n linkerd-viz get deploy,po -o wide || true
+
