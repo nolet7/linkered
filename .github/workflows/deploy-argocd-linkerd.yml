@@ -1,4 +1,4 @@
-name: Deploy Linkerd via Argo CD (SealedSecrets/GitOps)
+name: Deploy Linkerd via Argo CD
 
 on:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ----- gcloud + auth -----
+      # gcloud + auth
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -52,146 +52,104 @@ jobs:
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
           gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
 
-      - name: Select ENV
-        id: envpick
+      - name: Select ENV (dev if push)
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.environment }}" ]; then
-            ENV="${{ github.event.inputs.environment }}"
+            echo "ENV=${{ github.event.inputs.environment }}" >> "$GITHUB_ENV"
           else
-            ENV="dev"
+            echo "ENV=dev" >> "$GITHUB_ENV"
           fi
-          echo "ENV=$ENV" | tee -a $GITHUB_ENV
+          echo "Selected ENV=$ENV"
 
-      # ----- Apply Argo CD project and SealedSecrets app from your repo -----
-      - name: Apply Argo CD Project & SealedSecrets App
+      # --- AppProject + SealedSecrets (from repo files) ---
+      - name: Apply AppProject and SealedSecrets Application
         run: |
           set -euo pipefail
           kubectl apply -f argocd/project-platform-tools.yaml
           kubectl apply -f argocd/apps/sealed-secrets.yaml
 
-      - name: Wait for SealedSecrets controller
+      - name: Wait for SealedSecrets app, ns, and rollout
         run: |
+          set -euo pipefail
+
+          echo "Waiting for Argo CD Application sealed-secrets to be Synced & Healthy..."
+          for i in {1..60}; do
+            SYNC=$(kubectl -n argocd get app sealed-secrets -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+            HEALTH=$(kubectl -n argocd get app sealed-secrets -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+            echo "  sync=${SYNC:-<none>} health=${HEALTH:-<none>}"
+            if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
+              echo "Application is Synced & Healthy."
+              break
+            fi
+            sleep 5
+            if [ "$i" -eq 60 ]; then
+              echo "Timed out waiting for sealed-secrets Application to be Synced & Healthy"; exit 1
+            fi
+          done
+
+          echo "Waiting for namespace sealed-secrets to exist..."
+          for i in {1..60}; do
+            if kubectl get ns sealed-secrets >/dev/null 2>&1; then
+              echo "Namespace exists."
+              break
+            fi
+            sleep 2
+            if [ "$i" -eq 60 ]; then
+              echo "Timed out waiting for namespace sealed-secrets"; exit 1
+            fi
+          done
+
           kubectl -n sealed-secrets rollout status deploy/sealed-secrets --timeout=5m
 
-      # ----- Download kubeseal (used to seal issuer secret) -----
-      - name: Install kubeseal
+      # --- Linkerd Apps (use repo files in argocd/apps) ---
+      - name: Apply Linkerd Applications (CRDs, Control-Plane, Viz)
         run: |
           set -euo pipefail
-          VER=$(curl -s https://api.github.com/repos/bitnami-labs/sealed-secrets/releases/latest | grep tag_name | cut -d'"' -f4)
-          curl -L -o kubeseal "https://github.com/bitnami-labs/sealed-secrets/releases/download/${VER}/kubeseal-${VER#v}-linux-amd64"
-          chmod +x kubeseal
-          sudo mv kubeseal /usr/local/bin/
-          kubeseal --version
-
-      # ===== DEV ONLY: generate trust anchor & issuer, seal issuer, update values =====
-      - name: (DEV) Generate trust anchor + issuer, seal issuer, commit to repo
-        if: env.ENV == 'dev'
-        run: |
-          set -euo pipefail
-
-          # 1) Generate trust anchor & issuer (ephemeral in CI)
-          mkdir -p /tmp/linkerd-dev
-          openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
-            -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
-            -subj "/CN=linkerd-trust-anchor.dev"
-
-          openssl req -new -newkey rsa:4096 -nodes \
-            -keyout /tmp/linkerd-dev/issuer.key -out /tmp/linkerd-dev/issuer.csr \
-            -subj "/CN=linkerd-identity-issuer.dev"
-
-          openssl x509 -req -in /tmp/linkerd-dev/issuer.csr \
-            -CA /tmp/linkerd-dev/trust-anchor.crt -CAkey /tmp/linkerd-dev/ca.key -CAcreateserial \
-            -out /tmp/linkerd-dev/issuer.crt -days 3650
-
-          # 2) Prepare plain TLS Secret manifest (not applied; just used to seal)
-          kubectl -n linkerd create secret tls linkerd-identity-issuer \
-            --cert=/tmp/linkerd-dev/issuer.crt --key=/tmp/linkerd-dev/issuer.key \
-            --dry-run=client -o yaml > /tmp/issuer-secret.yaml
-
-          # 3) Fetch cluster's SealedSecrets public cert, seal the secret
-          kubeseal --controller-namespace sealed-secrets --controller-name sealed-secrets \
-            --fetch-cert > /tmp/sealed-secrets.crt
-
-          mkdir -p argocd/linkerd-ca
-          kubeseal --cert /tmp/sealed-secrets.crt --format yaml < /tmp/issuer-secret.yaml \
-            > argocd/linkerd-ca/linkerd-identity-issuer.sealedsecret.yaml
-
-          # 4) Write dev Helm values with the public trust anchor
-          mkdir -p helm-values/dev
-          cat > helm-values/dev/control-plane-values.yaml <<'EOF_HEAD'
-          installNamespace: false
-          cniEnabled: true
-          controllerReplicas: 1
-
-          identity:
-            # Linkerd will mount a pre-created Secret named linkerd-identity-issuer.
-            issuer:
-              scheme: kubernetes.io/tls
-
-          identityTrustAnchorsPEM: |
-          EOF_HEAD
-          # Append the actual trust anchor with correct indentation
-          sed 's/^/  /' /tmp/linkerd-dev/trust-anchor.crt >> helm-values/dev/control-plane-values.yaml
-
-          cat >> helm-values/dev/control-plane-values.yaml <<'EOF_TAIL'
-
-          proxy:
-            resources:
-              requests: { cpu: 50m, memory: 128Mi }
-              limits:   { cpu: 500m, memory: 512Mi }
-          EOF_TAIL
-
-          # 5) Commit any changes (sealed secret + values)
-          if ! git diff --quiet -- argocd/linkerd-ca/linkerd-identity-issuer.sealedsecret.yaml helm-values/dev/control-plane-values.yaml; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add argocd/linkerd-ca/linkerd-identity-issuer.sealedsecret.yaml helm-values/dev/control-plane-values.yaml
-            git commit -m "ci(dev): generate trust anchor & issuer; seal issuer; update dev values"
-            git push origin "$DEFAULT_BRANCH"
-          fi
-
-      # ----- Apply remaining Argo CD apps from your repo -----
-      - name: Apply Linkerd Argo CD Applications
-        run: |
-          set -euo pipefail
-          # CRDs
           kubectl apply -f argocd/apps/linkerd-crds-dev.yaml
-          # Sealed issuer secret app (reads argocd/linkerd-ca/)
-          kubectl apply -f argocd/apps/linkerd-identity-secrets-dev.yaml
-          # Control plane + Viz
           kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
           kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
 
-      # ----- Ensure sync-waves annotation are set (optional safeguard) -----
-      - name: Ensure sync waves (CRDs -2, secrets 0, control-plane 1, viz 2)
+      - name: Ensure autosync + waves and trigger syncs
         run: |
           set -euo pipefail
-          kubectl -n argocd patch application linkerd-crds-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"-2"}}}'
-          kubectl -n argocd patch application linkerd-identity-secrets-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"0"}}}'
-          kubectl -n argocd patch application linkerd-control-plane-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"1"}}}'
-          kubectl -n argocd patch application linkerd-viz-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"2"}}}'
+          apps=(linkerd-crds-dev linkerd-control-plane-dev linkerd-viz-dev)
 
-          # Auto-sync & self heal everywhere
-          for a in linkerd-crds-dev linkerd-identity-secrets-dev linkerd-control-plane-dev linkerd-viz-dev; do
+          # Waves: CRDs=-2, control-plane=0, viz=+1
+          kubectl -n argocd patch application "${apps[0]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"-2"}}}' || true
+          kubectl -n argocd patch application "${apps[1]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"0"}}}' || true
+          kubectl -n argocd patch application "${apps[2]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"+1"}}}' || true
+
+          for a in "${apps[@]}"; do
             kubectl -n argocd patch application "$a" --type merge -p \
-              '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true},"syncOptions":["CreateNamespace=true"]}}}'
+              '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true},"syncOptions":["CreateNamespace=true"]}}}' || true
+            kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}' || true
           done
 
-          # Kick off syncs
-          for a in linkerd-crds-dev linkerd-identity-secrets-dev linkerd-control-plane-dev linkerd-viz-dev; do
-            kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}'
-          done
-
-      # ----- Wait for readiness -----
-      - name: Wait for Linkerd control plane
+      - name: Wait for Linkerd control plane to be Available
         run: |
-          kubectl get ns linkerd >/dev/null 2>&1 || { echo "linkerd namespace not created yet"; exit 0; }
+          set -euo pipefail
+          # Wait for namespace (Argo will create it)
+          for i in {1..60}; do
+            if kubectl get ns linkerd >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+            if [ "$i" -eq 60 ]; then
+              echo "Timed out waiting for namespace linkerd"; exit 1
+            fi
+          done
+
+          # Wait for all deployments in linkerd to be ready
           kubectl -n linkerd get deploy -o name | xargs -r -I{} kubectl -n linkerd wait --for=condition=available --timeout=10m {}
 
-      - name: Wait for Linkerd Viz
+      - name: Wait for Linkerd Viz (optional)
         run: |
-          kubectl get ns linkerd-viz >/dev/null 2>&1 || { echo "linkerd-viz namespace not created yet"; exit 0; }
-          kubectl -n linkerd-viz get deploy -o name | xargs -r -I{} kubectl -n linkerd-viz wait --for=condition=available --timeout=10m {}
+          set -euo pipefail
+          if kubectl get ns linkerd-viz >/dev/null 2>&1; then
+            kubectl -n linkerd-viz get deploy -o name | xargs -r -I{} kubectl -n linkerd-viz wait --for=condition=available --timeout=10m {}
+          else
+            echo "linkerd-viz namespace not created yet"
+          fi
 
       - name: Show status
         run: |
