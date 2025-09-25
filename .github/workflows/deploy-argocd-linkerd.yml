@@ -1,4 +1,4 @@
-name: Deploy Linkerd via Argo CD
+name: Deploy Linkerd via Argo CD (SealedSecrets/GitOps)
 
 on:
   workflow_dispatch:
@@ -20,6 +20,7 @@ env:
   GKE_CLUSTER: lowcost-gke-ondemand
   GKE_ZONE: us-central1-a
   DEFAULT_BRANCH: master
+  REPO_SLUG: nolet7/linkered
 
 jobs:
   deploy:
@@ -32,7 +33,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -------- gcloud + cluster auth --------
+      # ----- gcloud + auth -----
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -51,316 +52,139 @@ jobs:
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
           gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
 
-      # -------- Compute ENV for both triggers --------
-      - name: Select environment (ENV)
+      - name: Select ENV
+        id: envpick
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.environment }}" ]; then
-            echo "ENV=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+            ENV="${{ github.event.inputs.environment }}"
           else
-            echo "ENV=dev" >> $GITHUB_ENV
+            ENV="dev"
           fi
-          echo "Selected ENV=$(grep '^ENV=' $GITHUB_ENV | cut -d= -f2)"
+          echo "ENV=$ENV" | tee -a $GITHUB_ENV
 
-      # -------- Ensure Argo CD Project exists --------
-      - name: Apply Argo CD Project
+      # ----- Apply Argo CD project and SealedSecrets app from your repo -----
+      - name: Apply Argo CD Project & SealedSecrets App
         run: |
+          set -euo pipefail
           kubectl apply -f argocd/project-platform-tools.yaml
+          kubectl apply -f argocd/apps/sealed-secrets.yaml
 
-      # -------- DEV ONLY: generate issuer + trust anchor, write CM/Secret and values --------
-      - name: Generate DEV identity (trust anchor & issuer) + write Secret/CM + values
+      - name: Wait for SealedSecrets controller
+        run: |
+          kubectl -n sealed-secrets rollout status deploy/sealed-secrets --timeout=5m
+
+      # ----- Download kubeseal (used to seal issuer secret) -----
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          VER=$(curl -s https://api.github.com/repos/bitnami-labs/sealed-secrets/releases/latest | grep tag_name | cut -d'"' -f4)
+          curl -L -o kubeseal "https://github.com/bitnami-labs/sealed-secrets/releases/download/${VER}/kubeseal-${VER#v}-linux-amd64"
+          chmod +x kubeseal
+          sudo mv kubeseal /usr/local/bin/
+          kubeseal --version
+
+      # ===== DEV ONLY: generate trust anchor & issuer, seal issuer, update values =====
+      - name: (DEV) Generate trust anchor + issuer, seal issuer, commit to repo
         if: env.ENV == 'dev'
         run: |
           set -euo pipefail
 
-          # Create materials
+          # 1) Generate trust anchor & issuer (ephemeral in CI)
           mkdir -p /tmp/linkerd-dev
-          # Trust anchor
           openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
             -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
             -subj "/CN=linkerd-trust-anchor.dev"
-          # Issuer signed by trust anchor
+
           openssl req -new -newkey rsa:4096 -nodes \
             -keyout /tmp/linkerd-dev/issuer.key -out /tmp/linkerd-dev/issuer.csr \
             -subj "/CN=linkerd-identity-issuer.dev"
+
           openssl x509 -req -in /tmp/linkerd-dev/issuer.csr \
             -CA /tmp/linkerd-dev/trust-anchor.crt -CAkey /tmp/linkerd-dev/ca.key -CAcreateserial \
             -out /tmp/linkerd-dev/issuer.crt -days 3650
 
-          # Ensure namespaces up front (Argo can also create, this just avoids race on Secret/CM apply)
-          kubectl get ns linkerd >/dev/null 2>&1 || kubectl create ns linkerd
+          # 2) Prepare plain TLS Secret manifest (not applied; just used to seal)
+          kubectl -n linkerd create secret tls linkerd-identity-issuer \
+            --cert=/tmp/linkerd-dev/issuer.crt --key=/tmp/linkerd-dev/issuer.key \
+            --dry-run=client -o yaml > /tmp/issuer-secret.yaml
 
-          # Secret for external issuer (tls.crt/tls.key) — name required by Linkerd
-          kubectl -n linkerd apply -f - <<'EOF'
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: linkerd-identity-issuer
-          type: kubernetes.io/tls
-          data:
-            tls.crt: PLACEHOLDER_CERT
-            tls.key: PLACEHOLDER_KEY
-          EOF
-          kubectl -n linkerd patch secret linkerd-identity-issuer --type json \
-            -p="[
-              {\"op\":\"replace\",\"path\":\"/data/tls.crt\",\"value\":\"$(base64 -w0 /tmp/linkerd-dev/issuer.crt)\"},
-              {\"op\":\"replace\",\"path\":\"/data/tls.key\",\"value\":\"$(base64 -w0 /tmp/linkerd-dev/issuer.key)\"}
-            ]"
+          # 3) Fetch cluster's SealedSecrets public cert, seal the secret
+          kubeseal --controller-namespace sealed-secrets --controller-name sealed-secrets \
+            --fetch-cert > /tmp/sealed-secrets.crt
 
-          # ConfigMap with trust anchors (ca-bundle.crt)
-          kubectl -n linkerd apply -f - <<'EOF'
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: linkerd-identity-trust-roots
-          data:
-            ca-bundle.crt: |
-          EOF
-          # Append the PEM into the CM
-          PEM_INDENTED="$(sed 's/^/  /' /tmp/linkerd-dev/trust-anchor.crt)"
-          kubectl -n linkerd patch configmap linkerd-identity-trust-roots --type merge -p "$(cat <<JSON
-          {
-            "data": {
-              "ca-bundle.crt": "$(printf "%s" "$PEM_INDENTED" | sed ':a;N;$!ba;s/\n/\\n/g')"
-            }
-          }
-          JSON
-          )"
+          mkdir -p argocd/linkerd-ca
+          kubeseal --cert /tmp/sealed-secrets.crt --format yaml < /tmp/issuer-secret.yaml \
+            > argocd/linkerd-ca/linkerd-identity-issuer.sealedsecret.yaml
 
-          # Write values used for dev (externalCA=false because we provide tls.* inline; set cniEnabled true)
+          # 4) Write dev Helm values with the public trust anchor
           mkdir -p helm-values/dev
-          {
-            echo "installNamespace: false"
-            echo "controllerReplicas: 1"
-            echo "cniEnabled: true"
-            echo "identity:"
-            echo "  externalCA: false"
-            echo "  issuer:"
-            echo "    scheme: kubernetes.io/tls"
-            echo "    tls:"
-            echo "      crtPEM: |"
-            sed 's/^/        /' /tmp/linkerd-dev/issuer.crt
-            echo "      keyPEM: |"
-            sed 's/^/        /' /tmp/linkerd-dev/issuer.key
-            echo "identityTrustAnchorsPEM: |"
-            sed 's/^/  /' /tmp/linkerd-dev/trust-anchor.crt
-            echo "proxy:"
-            echo "  resources:"
-            echo "    requests: { cpu: 50m, memory: 128Mi }"
-            echo "    limits:   { cpu: 500m, memory: 512Mi }"
-          } > helm-values/dev/control-plane-values.yaml
+          cat > helm-values/dev/control-plane-values.yaml <<'EOF_HEAD'
+          installNamespace: false
+          cniEnabled: true
+          controllerReplicas: 1
 
-      # -------- Apply CRDs, CNI, Control-Plane, Viz as Argo CD Applications (with sync waves) --------
-      - name: Create Argo CD Applications (CRDs, CNI, Control-Plane, Viz)
-        run: |
-          set -euo pipefail
+          identity:
+            # Linkerd will mount a pre-created Secret named linkerd-identity-issuer.
+            issuer:
+              scheme: kubernetes.io/tls
 
-          # --- CRDs (wave -2)
-          cat > /tmp/linkerd-crds-${ENV}.yaml <<'EOF_CRDS'
-          apiVersion: argoproj.io/v1alpha1
-          kind: Application
-          metadata:
-            name: linkerd-crds-__ENV__
-            namespace: argocd
-            annotations:
-              argocd.argoproj.io/sync-wave: "-2"
-          spec:
-            project: platform-tools
-            source:
-              repoURL: https://helm.linkerd.io/stable
-              chart: linkerd-crds
-              targetRevision: "*"
-            destination:
-              server: https://kubernetes.default.svc
-              namespace: linkerd
-            syncPolicy:
-              automated:
-                selfHeal: true
-                prune: true
-              syncOptions: [ CreateNamespace=true ]
-          EOF_CRDS
-          sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-crds-${ENV}.yaml
-          kubectl apply -f /tmp/linkerd-crds-${ENV}.yaml
+          identityTrustAnchorsPEM: |
+          EOF_HEAD
+          # Append the actual trust anchor with correct indentation
+          sed 's/^/  /' /tmp/linkerd-dev/trust-anchor.crt >> helm-values/dev/control-plane-values.yaml
 
-          # --- CNI (wave -1)
-          cat > /tmp/linkerd-cni-${ENV}.yaml <<'EOF_CNI'
-          apiVersion: argoproj.io/v1alpha1
-          kind: Application
-          metadata:
-            name: linkerd-cni-__ENV__
-            namespace: argocd
-            annotations:
-              argocd.argoproj.io/sync-wave: "-1"
-          spec:
-            project: platform-tools
-            source:
-              repoURL: https://helm.linkerd.io/stable
-              chart: linkerd-cni
-              targetRevision: "*"
-              helm:
-                values: |
-                  installNamespace: true
-            destination:
-              server: https://kubernetes.default.svc
-              namespace: linkerd-cni
-            syncPolicy:
-              automated:
-                selfHeal: true
-                prune: true
-              syncOptions: [ CreateNamespace=true ]
-          EOF_CNI
-          sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-cni-${ENV}.yaml
-          kubectl apply -f /tmp/linkerd-cni-${ENV}.yaml
+          cat >> helm-values/dev/control-plane-values.yaml <<'EOF_TAIL'
 
-          # --- Control-plane (wave 0)
-          if [ "$ENV" = "dev" ]; then
-            {
-              cat <<'EOF_CP_HDR'
-              apiVersion: argoproj.io/v1alpha1
-              kind: Application
-              metadata:
-                name: linkerd-control-plane-dev
-                namespace: argocd
-                annotations:
-                  argocd.argoproj.io/sync-wave: "0"
-              spec:
-                project: platform-tools
-                sources:
-                  - repoURL: https://github.com/${GITHUB_REPOSITORY}
-                    targetRevision: '"${DEFAULT_BRANCH}"'
-                    path: argocd/rbac
-                  - repoURL: https://helm.linkerd.io/stable
-                    chart: linkerd-control-plane
-                    targetRevision: "*"
-                    helm:
-                      values: |
-              EOF_CP_HDR
-              sed 's/^/                        /' helm-values/dev/control-plane-values.yaml
-              cat <<'EOF_CP_FTR'
-                destination:
-                  server: https://kubernetes.default.svc
-                  namespace: linkerd
-                syncPolicy:
-                  automated:
-                    selfHeal: true
-                    prune: true
-                  syncOptions: [ CreateNamespace=true ]
-                ignoreDifferences:
-                  - group: admissionregistration.k8s.io
-                    kind: MutatingWebhookConfiguration
-                    jqPathExpressions: [ ".webhooks[]?.clientConfig.caBundle" ]
-              EOF_CP_FTR
-            } > /tmp/linkerd-cp-${ENV}.yaml
-            kubectl apply -f /tmp/linkerd-cp-${ENV}.yaml
-          else
-            # staging/prod: we assume you pre-created issuer Secret & trust-roots CM (similar to dev) via org secrets or another job.
-            # Build minimal values (externalCA + CNI + trust anchors pulled from CM)
-            TA_FILE=/tmp/trust-anchor-${ENV}.crt
-            kubectl -n linkerd get cm linkerd-identity-trust-roots -o jsonpath='{.data.ca-bundle\.crt}' > "$TA_FILE"
+          proxy:
+            resources:
+              requests: { cpu: 50m, memory: 128Mi }
+              limits:   { cpu: 500m, memory: 512Mi }
+          EOF_TAIL
 
-            VALS=/tmp/cp-values-${ENV}.yaml
-            {
-              echo "installNamespace: false"
-              echo "controllerReplicas: $([ "$ENV" = "prod" ] && echo 3 || echo 2)"
-              echo "cniEnabled: true"
-              echo "identity:"
-              echo "  externalCA: true"
-              echo "identityTrustAnchorsPEM: |"
-              sed 's/^/  /' "$TA_FILE"
-              echo "proxy:"
-              echo "  resources:"
-              echo "    requests: { cpu: 50m, memory: 128Mi }"
-              echo "    limits:   { cpu: 500m, memory: 512Mi }"
-            } > "$VALS"
-
-            {
-              cat <<'EOF_CP_HDR2'
-              apiVersion: argoproj.io/v1alpha1
-              kind: Application
-              metadata:
-                name: linkerd-control-plane-__ENV__
-                namespace: argocd
-                annotations:
-                  argocd.argoproj.io/sync-wave: "0"
-              spec:
-                project: platform-tools
-                sources:
-                  - repoURL: https://github.com/${GITHUB_REPOSITORY}
-                    targetRevision: '"${DEFAULT_BRANCH}"'
-                    path: argocd/rbac
-                  - repoURL: https://helm.linkerd.io/stable
-                    chart: linkerd-control-plane
-                    targetRevision: "*"
-                    helm:
-                      values: |
-              EOF_CP_HDR2
-              sed 's/^/                        /' "$VALS"
-              cat <<'EOF_CP_FTR2'
-                destination:
-                  server: https://kubernetes.default.svc
-                  namespace: linkerd
-                syncPolicy:
-                  automated:
-                    selfHeal: true
-                    prune: true
-                  syncOptions: [ CreateNamespace=true ]
-                ignoreDifferences:
-                  - group: admissionregistration.k8s.io
-                    kind: MutatingWebhookConfiguration
-                    jqPathExpressions: [ ".webhooks[]?.clientConfig.caBundle" ]
-              EOF_CP_FTR2
-            } > /tmp/linkerd-cp-${ENV}.yaml
-            sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-cp-${ENV}.yaml
-            kubectl apply -f /tmp/linkerd-cp-${ENV}.yaml
+          # 5) Commit any changes (sealed secret + values)
+          if ! git diff --quiet -- argocd/linkerd-ca/linkerd-identity-issuer.sealedsecret.yaml helm-values/dev/control-plane-values.yaml; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add argocd/linkerd-ca/linkerd-identity-issuer.sealedsecret.yaml helm-values/dev/control-plane-values.yaml
+            git commit -m "ci(dev): generate trust anchor & issuer; seal issuer; update dev values"
+            git push origin "$DEFAULT_BRANCH"
           fi
 
-          # --- Viz (wave +1)
-          cat > /tmp/linkerd-viz-${ENV}.yaml <<'EOF_VIZ'
-          apiVersion: argoproj.io/v1alpha1
-          kind: Application
-          metadata:
-            name: linkerd-viz-__ENV__
-            namespace: argocd
-            annotations:
-              argocd.argoproj.io/sync-wave: "+1"
-          spec:
-            project: platform-tools
-            source:
-              repoURL: https://helm.linkerd.io/stable
-              chart: linkerd-viz
-              targetRevision: "*"
-              helm:
-                values: |
-                  installNamespace: false
-            destination:
-              server: https://kubernetes.default.svc
-              namespace: linkerd-viz
-            syncPolicy:
-              automated:
-                selfHeal: true
-                prune: true
-              syncOptions: [ CreateNamespace=true ]
-          EOF_VIZ
-          sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-viz-${ENV}.yaml
-          kubectl apply -f /tmp/linkerd-viz-${ENV}.yaml
-
-      # -------- Trigger syncs + autosync/self-heal guard --------
-      - name: Ensure autosync and trigger Argo CD syncs
+      # ----- Apply remaining Argo CD apps from your repo -----
+      - name: Apply Linkerd Argo CD Applications
         run: |
-          set -e
-          apps=(linkerd-crds-${ENV} linkerd-cni-${ENV} linkerd-control-plane-${ENV} linkerd-viz-${ENV})
-          for a in "${apps[@]}"; do
+          set -euo pipefail
+          # CRDs
+          kubectl apply -f argocd/apps/linkerd-crds-dev.yaml
+          # Sealed issuer secret app (reads argocd/linkerd-ca/)
+          kubectl apply -f argocd/apps/linkerd-identity-secrets-dev.yaml
+          # Control plane + Viz
+          kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
+          kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
+
+      # ----- Ensure sync-waves annotation are set (optional safeguard) -----
+      - name: Ensure sync waves (CRDs -2, secrets 0, control-plane 1, viz 2)
+        run: |
+          set -euo pipefail
+          kubectl -n argocd patch application linkerd-crds-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"-2"}}}'
+          kubectl -n argocd patch application linkerd-identity-secrets-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"0"}}}'
+          kubectl -n argocd patch application linkerd-control-plane-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"1"}}}'
+          kubectl -n argocd patch application linkerd-viz-dev --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"2"}}}'
+
+          # Auto-sync & self heal everywhere
+          for a in linkerd-crds-dev linkerd-identity-secrets-dev linkerd-control-plane-dev linkerd-viz-dev; do
             kubectl -n argocd patch application "$a" --type merge -p \
               '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true},"syncOptions":["CreateNamespace=true"]}}}'
           done
-          # trigger sync, CRDs first to avoid races
-          for a in "${apps[@]}"; do
-            kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}' || true
+
+          # Kick off syncs
+          for a in linkerd-crds-dev linkerd-identity-secrets-dev linkerd-control-plane-dev linkerd-viz-dev; do
+            kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}'
           done
 
-      # -------- Wait for readiness and show status --------
+      # ----- Wait for readiness -----
       - name: Wait for Linkerd control plane
         run: |
-          # If ns not yet created, don't fail this step (Argo sync will create it)
           kubectl get ns linkerd >/dev/null 2>&1 || { echo "linkerd namespace not created yet"; exit 0; }
           kubectl -n linkerd get deploy -o name | xargs -r -I{} kubectl -n linkerd wait --for=condition=available --timeout=10m {}
 
