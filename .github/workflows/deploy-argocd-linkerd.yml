@@ -33,7 +33,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # gcloud + auth
+      # --- gcloud + auth ---
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -49,10 +49,11 @@ jobs:
 
       - name: Get GKE credentials
         run: |
-          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
+          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> "$GITHUB_ENV"
           gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
 
       - name: Select ENV (dev if push)
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.environment }}" ]; then
             echo "ENV=${{ github.event.inputs.environment }}" >> "$GITHUB_ENV"
@@ -63,12 +64,14 @@ jobs:
 
       # --- AppProject + SealedSecrets (from repo files) ---
       - name: Apply AppProject and SealedSecrets Application
+        shell: bash
         run: |
           set -euo pipefail
           kubectl apply -f argocd/project-platform-tools.yaml
           kubectl apply -f argocd/apps/sealed-secrets.yaml
 
-      - name: Wait for SealedSecrets app, ns, and rollout
+      - name: Wait for SealedSecrets app, namespace, and rollout
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -76,45 +79,39 @@ jobs:
           for i in {1..60}; do
             SYNC=$(kubectl -n argocd get app sealed-secrets -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
             HEALTH=$(kubectl -n argocd get app sealed-secrets -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-            echo "  sync=${SYNC:-<none>} health=${HEALTH:-<none>}"
+            echo "  attempt=$i sync=${SYNC:-<none>} health=${HEALTH:-<none>}"
             if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
-              echo "Application is Synced & Healthy."
-              break
+              echo "sealed-secrets Application is Synced & Healthy."; break
             fi
             sleep 5
-            if [ "$i" -eq 60 ]; then
-              echo "Timed out waiting for sealed-secrets Application to be Synced & Healthy"; exit 1
-            fi
+            [ "$i" -eq 60 ] && echo "Timed out waiting for sealed-secrets Application" && exit 1
           done
 
           echo "Waiting for namespace sealed-secrets to exist..."
           for i in {1..60}; do
-            if kubectl get ns sealed-secrets >/dev/null 2>&1; then
-              echo "Namespace exists."
-              break
-            fi
+            kubectl get ns sealed-secrets >/dev/null 2>&1 && break
             sleep 2
-            if [ "$i" -eq 60 ]; then
-              echo "Timed out waiting for namespace sealed-secrets"; exit 1
-            fi
+            [ "$i" -eq 60 ] && echo "Timed out waiting for namespace sealed-secrets" && exit 1
           done
 
           kubectl -n sealed-secrets rollout status deploy/sealed-secrets --timeout=5m
 
       # --- Linkerd Apps (use repo files in argocd/apps) ---
       - name: Apply Linkerd Applications (CRDs, Control-Plane, Viz)
+        shell: bash
         run: |
           set -euo pipefail
-          kubectl apply -f argocd/apps/linkerd-crds-dev.yaml
-          kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
-          kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
+          kubectl apply -f "argocd/apps/linkerd-crds-${ENV}.yaml"
+          kubectl apply -f "argocd/apps/linkerd-control-plane-${ENV}.yaml"
+          kubectl apply -f "argocd/apps/linkerd-viz-${ENV}.yaml"
 
-      - name: Ensure autosync + waves and trigger syncs
+      - name: Ensure autosync, set sync waves, and trigger syncs
+        shell: bash
         run: |
           set -euo pipefail
-          apps=(linkerd-crds-dev linkerd-control-plane-dev linkerd-viz-dev)
+          apps=("linkerd-crds-${ENV}" "linkerd-control-plane-${ENV}" "linkerd-viz-${ENV}")
 
-          # Waves: CRDs=-2, control-plane=0, viz=+1
+          # Set waves: CRDs=-2, control-plane=0, viz=+1
           kubectl -n argocd patch application "${apps[0]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"-2"}}}' || true
           kubectl -n argocd patch application "${apps[1]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"0"}}}' || true
           kubectl -n argocd patch application "${apps[2]}" --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/sync-wave":"+1"}}}' || true
@@ -122,36 +119,58 @@ jobs:
           for a in "${apps[@]}"; do
             kubectl -n argocd patch application "$a" --type merge -p \
               '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true},"syncOptions":["CreateNamespace=true"]}}}' || true
+            # trigger sync
             kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}' || true
           done
 
       - name: Wait for Linkerd control plane to be Available
+        shell: bash
         run: |
           set -euo pipefail
-          # Wait for namespace (Argo will create it)
+          NS=linkerd
+
+          echo "Waiting for namespace ${NS}..."
           for i in {1..60}; do
-            if kubectl get ns linkerd >/dev/null 2>&1; then
-              break
-            fi
+            kubectl get ns "${NS}" >/dev/null 2>&1 && break
             sleep 2
-            if [ "$i" -eq 60 ]; then
-              echo "Timed out waiting for namespace linkerd"; exit 1
-            fi
+            [ "$i" -eq 60 ] && echo "Timed out waiting for namespace ${NS}" && exit 1
           done
 
-          # Wait for all deployments in linkerd to be ready
-          kubectl -n linkerd get deploy -o name | xargs -r -I{} kubectl -n linkerd wait --for=condition=available --timeout=10m {}
+          echo "Waiting for deployments to appear in ${NS}..."
+          for i in {1..60}; do
+            COUNT=$(kubectl -n "${NS}" get deploy --no-headers 2>/dev/null | wc -l || echo 0)
+            [ "${COUNT}" -gt 0 ] && break
+            sleep 5
+            [ "$i" -eq 60 ] && echo "Timed out waiting for deployments in ${NS}" && exit 1
+          done
+
+          echo "Waiting for all deployments in ${NS} to be Available..."
+          kubectl -n "${NS}" wait --for=condition=available --timeout=10m deploy --all
 
       - name: Wait for Linkerd Viz (optional)
+        shell: bash
         run: |
           set -euo pipefail
-          if kubectl get ns linkerd-viz >/dev/null 2>&1; then
-            kubectl -n linkerd-viz get deploy -o name | xargs -r -I{} kubectl -n linkerd-viz wait --for=condition=available --timeout=10m {}
-          else
-            echo "linkerd-viz namespace not created yet"
+          NS=linkerd-viz
+
+          if ! kubectl get ns "${NS}" >/dev/null 2>&1; then
+            echo "Namespace ${NS} not created yet (skipping)."
+            exit 0
           fi
 
+          echo "Waiting for deployments to appear in ${NS}..."
+          for i in {1..60}; do
+            COUNT=$(kubectl -n "${NS}" get deploy --no-headers 2>/dev/null | wc -l || echo 0)
+            [ "${COUNT}" -gt 0 ] && break
+            sleep 5
+            [ "$i" -eq 60 ] && echo "Timed out waiting for deployments in ${NS}" && exit 1
+          done
+
+          echo "Waiting for all deployments in ${NS} to be Available..."
+          kubectl -n "${NS}" wait --for=condition=available --timeout=10m deploy --all
+
       - name: Show status
+        shell: bash
         run: |
           echo "== Argo CD Applications =="
           kubectl -n argocd get applications
