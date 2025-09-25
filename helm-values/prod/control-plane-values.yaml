@@ -1,0 +1,19 @@
+installNamespace: false
+controllerReplicas: 3
+proxy:
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 1,    memory: 1Gi }
+
+# Provide prod trust anchor + issuer via GitHub Secrets (the Action injects them at apply time)
+identityTrustAnchorsPEM: |
+  # PROD TRUST ANCHOR PEM
+
+identity:
+  issuer:
+    scheme: kubernetes.io/tls
+    tls:
+      crtPEM: |
+        # PROD ISSUER CERT PEM
+      keyPEM: |
+        # PROD ISSUER KEY PEM

@@ -1,0 +1,19 @@
+installNamespace: false
+controllerReplicas: 2
+proxy:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# Provide staging trust anchor + issuer via GitHub Secrets (the Action injects them at apply time)
+identityTrustAnchorsPEM: |
+  # STAGING TRUST ANCHOR PEM
+
+identity:
+  issuer:
+    scheme: kubernetes.io/tls
+    tls:
+      crtPEM: |
+        # STAGING ISSUER CERT PEM
+      keyPEM: |
+        # STAGING ISSUER KEY PEM

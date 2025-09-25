@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform-tools
+  namespace: argocd
+spec:
+  description: Tools managed by platform engineering
+  sourceRepos:
+    - https://helm.linkerd.io/stable
+    - https://github.com/nolet7/linkered
+  destinations:
+    - namespace: linkerd
+      server: https://kubernetes.default.svc
+    - namespace: linkerd-viz
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  roles:
+    - name: admins
+      description: Platform administrators
+      policies:
+        - p, proj:platform-tools:admins, applications, *, platform-tools/*, allow

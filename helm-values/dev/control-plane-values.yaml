@@ -1,0 +1,22 @@
+# Helm note: CLI auto-generates identity; Helm does NOT. Provide identity here.
+installNamespace: false
+
+controllerReplicas: 1
+
+proxy:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 256Mi }
+
+# The Action replaces these placeholders for DEV:
+identityTrustAnchorsPEM: |
+  __DEV_TRUST_ANCHOR_PEM__
+
+identity:
+  issuer:
+    scheme: kubernetes.io/tls
+    tls:
+      crtPEM: |
+        __DEV_ISSUER_CRT_PEM__
+      keyPEM: |
+        __DEV_ISSUER_KEY_PEM__

@@ -1,0 +1,195 @@
+name: Deploy Linkerd via Argo CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Environment to deploy
+        default: dev
+        options: [dev, staging, prod]
+  push:
+    branches: [ main ]
+    paths:
+      - 'argocd/**'
+      - 'helm-values/**'
+      - '.github/workflows/deploy-argocd-linkerd.yml'
+
+env:
+  PROJECT_ID: idp-0903
+  GKE_CLUSTER: lowcost-gke-ondemand
+  GKE_ZONE: us-central1-a
+  DEFAULT_BRANCH: main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Auth with service account
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
+          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
+
+      # DEV ONLY: generate self-signed certs & inject into dev values
+      - name: Generate DEV identity certs (trust anchor + issuer)
+        if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
+        run: |
+          mkdir -p /tmp/linkerd-dev
+          openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
+            -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
+            -subj "/CN=linkerd-trust-anchor.dev"
+          openssl req -newkey rsa:4096 -nodes -keyout /tmp/linkerd-dev/issuer.key \
+            -out /tmp/linkerd-dev/issuer.csr -subj "/CN=linkerd-identity-issuer.dev"
+          openssl x509 -req -in /tmp/linkerd-dev/issuer.csr \
+            -CA /tmp/linkerd-dev/trust-anchor.crt -CAkey /tmp/linkerd-dev/ca.key -CAcreateserial \
+            -out /tmp/linkerd-dev/issuer.crt -days 3650
+          TA=$(sed '1s/^/-----BEGIN CERTIFICATE-----\n/;$s/$/\n-----END CERTIFICATE-----/' /tmp/linkerd-dev/trust-anchor.crt | sed 's/[&/\]/\\&/g')
+          CRT=$(sed '1s/^/-----BEGIN CERTIFICATE-----\n/;$s/$/\n-----END CERTIFICATE-----/' /tmp/linkerd-dev/issuer.crt | sed 's/[&/\]/\\&/g')
+          KEY=$(sed '1s/^/-----BEGIN PRIVATE KEY-----\n/;$s/$/\n-----END PRIVATE KEY-----/' /tmp/linkerd-dev/issuer.key | sed 's/[&/\]/\\&/g')
+          sed -i "s|__DEV_TRUST_ANCHOR_PEM__|$TA|g" helm-values/dev/control-plane-values.yaml
+          sed -i "s|__DEV_ISSUER_CRT_PEM__|$CRT|g" helm-values/dev/control-plane-values.yaml
+          sed -i "s|__DEV_ISSUER_KEY_PEM__|$KEY|g" helm-values/dev/control-plane-values.yaml
+
+      - name: Commit dev values change (if any)
+        if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
+        run: |
+          if ! git diff --quiet -- helm-values/dev/control-plane-values.yaml; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add helm-values/dev/control-plane-values.yaml
+            git commit -m "ci(dev): auto-generate Linkerd identity certs"
+            git push origin "$DEFAULT_BRANCH"
+          fi
+
+      - name: Apply Argo CD Project
+        run: kubectl apply -f argocd/project-platform-tools.yaml
+
+      - name: Deploy DEV apps
+        if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
+        run: |
+          kubectl apply -f argocd/apps/linkerd-crds-dev.yaml
+          kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
+          kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
+
+      - name: Deploy STAGING/PROD apps (inline values from secrets)
+        if: ${{ (github.event.inputs.environment || 'dev') != 'dev' }}
+        env:
+          ENV: ${{ github.event.inputs.environment }}
+          TRUST_ANCHOR: ${{ secrets[format('LINKERD_{0}_TRUST_ANCHOR_PEM', upper(github.event.inputs.environment))] }}
+          ISSUER_CERT:  ${{ secrets[format('LINKERD_{0}_ISSUER_CERT_PEM',  upper(github.event.inputs.environment))] }}
+          ISSUER_KEY:   ${{ secrets[format('LINKERD_{0}_ISSUER_KEY_PEM',   upper(github.event.inputs.environment))] }}
+        run: |
+          if [ -z "$TRUST_ANCHOR" ] || [ -z "$ISSUER_CERT" ] || [ -z "$ISSUER_KEY" ]; then
+            echo "Missing secrets LINKERD_${ENV^^}_TRUST_ANCHOR_PEM / _ISSUER_CERT_PEM / _ISSUER_KEY_PEM"; exit 1
+          fi
+          cat > /tmp/linkerd-crds-${ENV}.yaml <<'APP'
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: linkerd-crds-__ENV__
+            namespace: argocd
+          spec:
+            project: platform-tools
+            source:
+              repoURL: https://helm.linkerd.io/stable
+              chart: linkerd-crds
+              targetRevision: "*"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: linkerd
+            syncPolicy:
+              automated: { selfHeal: true, prune: true }
+              syncOptions: [ CreateNamespace=true ]
+          APP
+          sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-crds-${ENV}.yaml
+          kubectl apply -f /tmp/linkerd-crds-${ENV}.yaml
+
+          cat > /tmp/linkerd-control-plane-${ENV}.yaml <<APP
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: linkerd-control-plane-${ENV}
+            namespace: argocd
+          spec:
+            project: platform-tools
+            sources:
+              - repoURL: https://github.com/nolet7/linkered
+                targetRevision: ${DEFAULT_BRANCH}
+                path: argocd/rbac
+              - repoURL: https://helm.linkerd.io/stable
+                chart: linkerd-control-plane
+                targetRevision: "*"
+                helm:
+                  values: |
+                    installNamespace: false
+                    controllerReplicas: $([ "$ENV" = "prod" ] && echo 3 || echo 2)
+                    proxy:
+                      resources:
+                        requests: { cpu: 50m, memory: 128Mi }
+                        limits:   { cpu: 500m, memory: 512Mi }
+                    identityTrustAnchorsPEM: |
+          $(echo "$TRUST_ANCHOR" | sed 's/^/                    /')
+                    identity:
+                      issuer:
+                        scheme: kubernetes.io/tls
+                        tls:
+                          crtPEM: |
+          $(echo "$ISSUER_CERT" | sed 's/^/                            /')
+                          keyPEM: |
+          $(echo "$ISSUER_KEY" | sed 's/^/                            /')
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: linkerd
+            syncPolicy:
+              automated: { selfHeal: true, prune: true }
+              syncOptions: [ CreateNamespace=true ]
+            ignoreDifferences:
+              - group: admissionregistration.k8s.io
+                kind: MutatingWebhookConfiguration
+                jqPathExpressions: [ '.webhooks[]?.clientConfig.caBundle' ]
+          APP
+          kubectl apply -f /tmp/linkerd-control-plane-${ENV}.yaml
+
+          cat > /tmp/linkerd-viz-${ENV}.yaml <<'APP'
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: linkerd-viz-__ENV__
+            namespace: argocd
+          spec:
+            project: platform-tools
+            source:
+              repoURL: https://helm.linkerd.io/stable
+              chart: linkerd-viz
+              targetRevision: "*"
+              helm:
+                values: |
+                  installNamespace: false
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: linkerd-viz
+            syncPolicy:
+              automated: { selfHeal: true, prune: true }
+              syncOptions: [ CreateNamespace=true ]
+          APP
+          sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-viz-${ENV}.yaml
+          kubectl apply -f /tmp/linkerd-viz-${ENV}.yaml
+
+      - name: Quick health (non-blocking)
+        run: |
+          kubectl -n linkerd get deploy || true
+          kubectl -n linkerd get po -o wide || true
