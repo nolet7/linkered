@@ -8,10 +8,15 @@ spec:
   sourceRepos:
     - https://helm.linkerd.io/stable
     - https://github.com/nolet7/linkered
+    - https://bitnami-labs.github.io/sealed-secrets
   destinations:
     - namespace: linkerd
       server: https://kubernetes.default.svc
     - namespace: linkerd-viz
+      server: https://kubernetes.default.svc
+    - namespace: linkerd-cni
+      server: https://kubernetes.default.svc
+    - namespace: sealed-secrets
       server: https://kubernetes.default.svc
     - namespace: cert-manager
       server: https://kubernetes.default.svc
@@ -25,3 +30,4 @@ spec:
       description: Platform administrators
       policies:
         - p, proj:platform-tools:admins, applications, *, platform-tools/*, allow
+
