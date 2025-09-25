@@ -1,144 +1,3 @@
-name: Deploy Linkerd via Argo CD
-
-on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        type: choice
-        description: Environment to deploy
-        default: dev
-        options: [dev, staging, prod]
-  push:
-    branches: [ master ]
-    paths:
-      - 'argocd/**'
-      - 'helm-values/**'
-      - '.github/workflows/deploy-argocd-linkerd.yml'
-
-env:
-  PROJECT_ID: idp-0903
-  GKE_CLUSTER: lowcost-gke-ondemand
-  GKE_ZONE: us-central1-a
-  DEFAULT_BRANCH: master
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          version: '>= 475.0.0'
-
-      - name: Auth with service account
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Install GKE auth plugin
-        run: gcloud components install gke-gcloud-auth-plugin -q
-
-      - name: Get GKE credentials
-        run: |
-          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
-          gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
-
-      # ------------------------------------------------------------------
-      # Prepare identity materials (Secret + ConfigMap) entirely in CI
-      # ------------------------------------------------------------------
-      - name: Prepare Linkerd identity (Secret + ConfigMap)
-        env:
-          ENV: ${{ github.event.inputs.environment || 'dev' }}
-          STAGING_TA:   ${{ secrets.LINKERD_STAGING_TRUST_ANCHOR_PEM }}
-          STAGING_CERT: ${{ secrets.LINKERD_STAGING_ISSUER_CERT_PEM }}
-          STAGING_KEY:  ${{ secrets.LINKERD_STAGING_ISSUER_KEY_PEM }}
-          PROD_TA:      ${{ secrets.LINKERD_PROD_TRUST_ANCHOR_PEM }}
-          PROD_CERT:    ${{ secrets.LINKERD_PROD_ISSUER_CERT_PEM }}
-          PROD_KEY:     ${{ secrets.LINKERD_PROD_ISSUER_KEY_PEM }}
-        run: |
-          set -euo pipefail
-
-          kubectl get ns linkerd >/dev/null 2>&1 || kubectl create ns linkerd
-
-          if [ "$ENV" = "dev" ]; then
-            mkdir -p /tmp/linkerd-dev
-            # Trust anchor (self-signed)
-            openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
-              -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
-              -subj "/CN=linkerd-trust-anchor.dev"
-            # Issuer signed by trust anchor
-            openssl req -new -newkey rsa:4096 -nodes \
-              -keyout /tmp/linkerd-dev/issuer.key -out /tmp/linkerd-dev/issuer.csr \
-              -subj "/CN=linkerd-identity-issuer.dev"
-            openssl x509 -req -in /tmp/linkerd-dev/issuer.csr \
-              -CA /tmp/linkerd-dev/trust-anchor.crt -CAkey /tmp/linkerd-dev/ca.key -CAcreateserial \
-              -out /tmp/linkerd-dev/issuer.crt -days 3650
-
-            TA_PEM="$(cat /tmp/linkerd-dev/trust-anchor.crt)"
-            CRT_PEM="$(cat /tmp/linkerd-dev/issuer.crt)"
-            KEY_PEM="$(cat /tmp/linkerd-dev/issuer.key)"
-          else
-            case "$ENV" in
-              staging) TA_PEM="$STAGING_TA"; CRT_PEM="$STAGING_CERT"; KEY_PEM="$STAGING_KEY" ;;
-              prod)    TA_PEM="$PROD_TA";    CRT_PEM="$PROD_CERT";    KEY_PEM="$PROD_KEY" ;;
-              *) echo "Unknown ENV $ENV"; exit 1 ;;
-            esac
-            test -n "${TA_PEM:-}" && test -n "${CRT_PEM:-}" && test -n "${KEY_PEM:-}" || { echo "Missing Linkerd issuer secrets for $ENV"; exit 1; }
-          fi
-
-          printf "%s" "$CRT_PEM" > /tmp/issuer.crt
-          printf "%s" "$KEY_PEM" > /tmp/issuer.key
-          printf "%s" "$TA_PEM"  > /tmp/trust-anchor.crt
-
-          # Secret (issuer)
-          kubectl -n linkerd create secret tls linkerd-identity-issuer \
-            --cert=/tmp/issuer.crt --key=/tmp/issuer.key \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          # ConfigMap (trust roots)
-          kubectl -n linkerd create configmap linkerd-identity-trust-roots \
-            --from-file=ca-bundle.crt=/tmp/trust-anchor.crt \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          # Build a small values file for dev (externalCA + cniEnabled + anchors)
-          if [ "$ENV" = "dev" ]; then
-            mkdir -p helm-values/dev
-            {
-              echo "installNamespace: false"
-              echo "controllerReplicas: 1"
-              echo "cniEnabled: true"
-              echo "identity:"
-              echo "  externalCA: true"
-              echo "identityTrustAnchorsPEM: |"
-              sed 's/^/  /' /tmp/trust-anchor.crt
-              echo "proxy:"
-              echo "  resources:"
-              echo "    requests: { cpu: 20m, memory: 64Mi }"
-              echo "    limits:   { cpu: 200m, memory: 256Mi }"
-            } > helm-values/dev/control-plane-values.yaml
-
-            if ! git diff --quiet -- helm-values/dev/control-plane-values.yaml; then
-              git config user.name  "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add helm-values/dev/control-plane-values.yaml
-              git commit -m "ci(dev): write Linkerd externalCA values (CNI on)"
-              git push origin "$DEFAULT_BRANCH"
-            fi
-          fi
-
-      - name: Apply Argo CD Project
-        run: kubectl apply -f argocd/project-platform-tools.yaml
-
-      # ------------------------------------------------------------------
-      # Create Argo CD Applications with properly CLOSED heredocs
-      # ------------------------------------------------------------------
       - name: Create Argo CD Applications (CRDs, CNI, Control-Plane, Viz)
         env:
           ENV: ${{ github.event.inputs.environment || 'dev' }}
@@ -164,7 +23,9 @@ jobs:
               server: https://kubernetes.default.svc
               namespace: linkerd
             syncPolicy:
-              automated: { selfHeal: true, prune: true }
+              automated:
+                selfHeal: true
+                prune: true
               syncOptions: [ CreateNamespace=true ]
           EOF_CRDS
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-crds-${ENV}.yaml
@@ -192,7 +53,9 @@ jobs:
               server: https://kubernetes.default.svc
               namespace: linkerd-cni
             syncPolicy:
-              automated: { selfHeal: true, prune: true }
+              automated:
+                selfHeal: true
+                prune: true
               syncOptions: [ CreateNamespace=true ]
           EOF_CNI
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-cni-${ENV}.yaml
@@ -200,96 +63,102 @@ jobs:
 
           # --- Control-plane (wave 0)
           if [ "$ENV" = "dev" ]; then
-            # Inline values from the repo file we just wrote
+            # Build the Application by stitching header + indented values + footer
             {
-              echo "apiVersion: argoproj.io/v1alpha1"
-              echo "kind: Application"
-              echo "metadata:"
-              echo "  name: linkerd-control-plane-dev"
-              echo "  namespace: argocd"
-              echo "  annotations:"
-              echo "    argocd.argoproj.io/sync-wave: \"0\""
-              echo "spec:"
-              echo "  project: platform-tools"
-              echo "  sources:"
-              echo "    - repoURL: https://github.com/${{ github.repository }}"
-              echo "      targetRevision: ${DEFAULT_BRANCH}"
-              echo "      path: argocd/rbac"
-              echo "    - repoURL: https://helm.linkerd.io/stable"
-              echo "      chart: linkerd-control-plane"
-              echo "      targetRevision: \"*\""
-              echo "      helm:"
-              echo "        values: |"
-              sed 's/^/          /' helm-values/dev/control-plane-values.yaml
-              echo "  destination:"
-              echo "    server: https://kubernetes.default.svc"
-              echo "    namespace: linkerd"
-              echo "  syncPolicy:"
-              echo "    automated: { selfHeal: true, prune: true }"
-              echo "    syncOptions: [ CreateNamespace=true ]"
-              echo "  ignoreDifferences:"
-              echo "    - group: admissionregistration.k8s.io"
-              echo "      kind: MutatingWebhookConfiguration"
-              echo "      jqPathExpressions: [ \".webhooks[]?.clientConfig.caBundle\" ]"
+              cat <<'EOF_CP_HDR'
+              apiVersion: argoproj.io/v1alpha1
+              kind: Application
+              metadata:
+                name: linkerd-control-plane-dev
+                namespace: argocd
+                annotations:
+                  argocd.argoproj.io/sync-wave: "0"
+              spec:
+                project: platform-tools
+                sources:
+                  - repoURL: https://github.com/${GITHUB_REPOSITORY}
+                    targetRevision: '"${DEFAULT_BRANCH}"'
+                    path: argocd/rbac
+                  - repoURL: https://helm.linkerd.io/stable
+                    chart: linkerd-control-plane
+                    targetRevision: "*"
+                    helm:
+                      values: |
+              EOF_CP_HDR
+              sed 's/^/                        /' helm-values/dev/control-plane-values.yaml
+              cat <<'EOF_CP_FTR'
+                destination:
+                  server: https://kubernetes.default.svc
+                  namespace: linkerd
+                syncPolicy:
+                  automated:
+                    selfHeal: true
+                    prune: true
+                  syncOptions: [ CreateNamespace=true ]
+                ignoreDifferences:
+                  - group: admissionregistration.k8s.io
+                    kind: MutatingWebhookConfiguration
+                    jqPathExpressions: [ ".webhooks[]?.clientConfig.caBundle" ]
+              EOF_CP_FTR
             } > /tmp/linkerd-cp-${ENV}.yaml
             kubectl apply -f /tmp/linkerd-cp-${ENV}.yaml
           else
-            # staging/prod: inline TA only (issuer Secret already created)
-            TA_FILE=/tmp/trust-anchor-inline.txt
-            # These are not expanded inside heredoc; we will append the TA after
-            cat > /tmp/linkerd-cp-${ENV}.yaml <<'EOF_CP'
-            apiVersion: argoproj.io/v1alpha1
-            kind: Application
-            metadata:
-              name: linkerd-control-plane-__ENV__
-              namespace: argocd
-              annotations:
-                argocd.argoproj.io/sync-wave: "0"
-            spec:
-              project: platform-tools
-              sources:
-                - repoURL: https://github.com/REPO_PLACEHOLDER
-                  targetRevision: BRANCH_PLACEHOLDER
-                  path: argocd/rbac
-                - repoURL: https://helm.linkerd.io/stable
-                  chart: linkerd-control-plane
-                  targetRevision: "*"
-                  helm:
-                    values: |
-                      installNamespace: false
-                      controllerReplicas: 2
-                      cniEnabled: true
-                      identity:
-                        externalCA: true
-                      identityTrustAnchorsPEM: |
-            EOF_CP
-            # substitute repo/branch placeholders
-            sed -i "s|REPO_PLACEHOLDER|${{ github.repository }}|g" /tmp/linkerd-cp-${ENV}.yaml
-            sed -i "s|BRANCH_PLACEHOLDER|${DEFAULT_BRANCH}|g" /tmp/linkerd-cp-${ENV}.yaml
+            # Create a temp values file that includes the trust anchor from the ConfigMap we created earlier
+            TA_FILE=/tmp/trust-anchor-${ENV}.crt
+            # Pull from the CM we applied earlier (created in the previous step)
+            kubectl -n linkerd get cm linkerd-identity-trust-roots -o jsonpath='{.data.ca-bundle\.crt}' > "$TA_FILE"
+
+            # Compose a minimal values file (externalCA + CNI + trust anchors)
+            VALS=/tmp/cp-values-${ENV}.yaml
+            {
+              echo "installNamespace: false"
+              echo "controllerReplicas: 2"
+              echo "cniEnabled: true"
+              echo "identity:"
+              echo "  externalCA: true"
+              echo "identityTrustAnchorsPEM: |"
+              sed 's/^/  /' "$TA_FILE"
+            } > "$VALS"
+
+            # Stitch header + indented values + footer
+            {
+              cat <<'EOF_CP_HDR2'
+              apiVersion: argoproj.io/v1alpha1
+              kind: Application
+              metadata:
+                name: linkerd-control-plane-__ENV__
+                namespace: argocd
+                annotations:
+                  argocd.argoproj.io/sync-wave: "0"
+              spec:
+                project: platform-tools
+                sources:
+                  - repoURL: https://github.com/${GITHUB_REPOSITORY}
+                    targetRevision: '"${DEFAULT_BRANCH}"'
+                    path: argocd/rbac
+                  - repoURL: https://helm.linkerd.io/stable
+                    chart: linkerd-control-plane
+                    targetRevision: "*"
+                    helm:
+                      values: |
+              EOF_CP_HDR2
+              sed 's/^/                        /' "$VALS"
+              cat <<'EOF_CP_FTR2'
+                destination:
+                  server: https://kubernetes.default.svc
+                  namespace: linkerd
+                syncPolicy:
+                  automated:
+                    selfHeal: true
+                    prune: true
+                  syncOptions: [ CreateNamespace=true ]
+                ignoreDifferences:
+                  - group: admissionregistration.k8s.io
+                    kind: MutatingWebhookConfiguration
+                    jqPathExpressions: [ ".webhooks[]?.clientConfig.caBundle" ]
+              EOF_CP_FTR2
+            } > /tmp/linkerd-cp-${ENV}.yaml
             sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-cp-${ENV}.yaml
-
-            # append TA with correct indentation (22 spaces)
-            if [ "$ENV" = "staging" ]; then
-              printf "%s\n" "${{ secrets.LINKERD_STAGING_TRUST_ANCHOR_PEM }}" | sed 's/^/                      /' >> /tmp/linkerd-cp-${ENV}.yaml
-            else
-              printf "%s\n" "${{ secrets.LINKERD_PROD_TRUST_ANCHOR_PEM }}" | sed 's/^/                      /' >> /tmp/linkerd-cp-${ENV}.yaml
-            fi
-
-            # close the YAML
-            cat >> /tmp/linkerd-cp-${ENV}.yaml <<'EOF_CP2'
-
-              destination:
-                server: https://kubernetes.default.svc
-                namespace: linkerd
-              syncPolicy:
-                automated: { selfHeal: true, prune: true }
-                syncOptions: [ CreateNamespace=true ]
-              ignoreDifferences:
-                - group: admissionregistration.k8s.io
-                  kind: MutatingWebhookConfiguration
-                  jqPathExpressions: [ ".webhooks[]?.clientConfig.caBundle" ]
-            EOF_CP2
-
             kubectl apply -f /tmp/linkerd-cp-${ENV}.yaml
           fi
 
@@ -315,38 +184,10 @@ jobs:
               server: https://kubernetes.default.svc
               namespace: linkerd-viz
             syncPolicy:
-              automated: { selfHeal: true, prune: true }
+              automated:
+                selfHeal: true
+                prune: true
               syncOptions: [ CreateNamespace=true ]
           EOF_VIZ
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-viz-${ENV}.yaml
           kubectl apply -f /tmp/linkerd-viz-${ENV}.yaml
-
-      - name: Trigger syncs in order
-        env:
-          ENV: ${{ github.event.inputs.environment || 'dev' }}
-        run: |
-          set -e
-          if [ "$ENV" = "dev" ]; then
-            apps=(linkerd-crds-dev linkerd-cni-dev linkerd-control-plane-dev linkerd-viz-dev)
-          else
-            apps=(linkerd-crds-$ENV linkerd-cni-$ENV linkerd-control-plane-$ENV linkerd-viz-$ENV)
-          fi
-          for a in "${apps[@]}"; do
-            kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}' || true
-          done
-
-      - name: Wait for Linkerd control plane
-        run: |
-          kubectl get ns linkerd >/dev/null 2>&1 || { echo "linkerd ns not present yet"; exit 0; }
-          kubectl -n linkerd get deploy -o name | xargs -r -I{} kubectl -n linkerd wait --for=condition=available --timeout=15m {}
-
-      - name: Wait for Linkerd Viz
-        run: |
-          kubectl get ns linkerd-viz >/dev/null 2>&1 || { echo "linkerd-viz ns not present yet"; exit 0; }
-          kubectl -n linkerd-viz get deploy -o name | xargs -r -I{} kubectl -n linkerd-viz wait --for=condition=available --timeout=10m {}
-
-      - name: Show status
-        run: |
-          echo "== Argo CD Applications ==" && kubectl -n argocd get applications
-          echo "== Linkerd (linkerd) ==" && kubectl -n linkerd get deploy,po -o wide || true
-          echo "== Linkerd Viz (linkerd-viz) ==" && kubectl -n linkerd-viz get deploy,po -o wide || true
