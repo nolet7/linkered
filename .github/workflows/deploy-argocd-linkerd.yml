@@ -31,8 +31,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup gcloud
+      - name: Setup gcloud (with components)
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: true
+          components: gke-gcloud-auth-plugin
 
       - name: Auth with service account
         uses: google-github-actions/auth@v2
@@ -41,30 +44,47 @@ jobs:
 
       - name: Get GKE credentials
         run: |
-          gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
+          gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE" --project "$PROJECT_ID"
 
-      # DEV ONLY: generate self-signed certs & inject into dev values
-      - name: Generate DEV identity certs (trust anchor + issuer)
+      # DEV ONLY: generate certs and WRITE the values file (no sed replacements)
+      - name: Generate DEV identity certs (trust anchor + issuer) and write values
         if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
         run: |
           mkdir -p /tmp/linkerd-dev
+          # Trust anchor (self-signed)
           openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
             -keyout /tmp/linkerd-dev/ca.key -out /tmp/linkerd-dev/trust-anchor.crt \
             -subj "/CN=linkerd-trust-anchor.dev"
-          openssl req -newkey rsa:4096 -nodes -keyout /tmp/linkerd-dev/issuer.key \
-            -out /tmp/linkerd-dev/issuer.csr -subj "/CN=linkerd-identity-issuer.dev"
+          # Issuer signed by trust anchor
+          openssl req -new -newkey rsa:4096 -nodes \
+            -keyout /tmp/linkerd-dev/issuer.key -out /tmp/linkerd-dev/issuer.csr \
+            -subj "/CN=linkerd-identity-issuer.dev"
           openssl x509 -req -in /tmp/linkerd-dev/issuer.csr \
             -CA /tmp/linkerd-dev/trust-anchor.crt -CAkey /tmp/linkerd-dev/ca.key -CAcreateserial \
             -out /tmp/linkerd-dev/issuer.crt -days 3650
 
-          TA=$(sed '1s/^/-----BEGIN CERTIFICATE-----\n/;$s/$/\n-----END CERTIFICATE-----/' /tmp/linkerd-dev/trust-anchor.crt | sed 's/[&/\]/\\&/g')
-          CRT=$(sed '1s/^/-----BEGIN CERTIFICATE-----\n/;$s/$/\n-----END CERTIFICATE-----/' /tmp/linkerd-dev/issuer.crt | sed 's/[&/\]/\\&/g')
-          KEY=$(sed '1s/^/-----BEGIN PRIVATE KEY-----\n/;$s/$/\n-----END PRIVATE KEY-----/' /tmp/linkerd-dev/issuer.key | sed 's/[&/\]/\\&/g')
-
-          sed -i "s|__DEV_TRUST_ANCHOR_PEM__|$TA|g" helm-values/dev/control-plane-values.yaml
-          sed -i "s|__DEV_ISSUER_CRT_PEM__|$CRT|g" helm-values/dev/control-plane-values.yaml
-          sed -i "s|__DEV_ISSUER_KEY_PEM__|$KEY|g" helm-values/dev/control-plane-values.yaml
+          # Recreate the dev values file embedding PEMs safely
+          mkdir -p helm-values/dev
+          {
+            printf "%s\n" "installNamespace: false"
+            printf "%s\n" "controllerReplicas: 1"
+            printf "%s\n" "proxy:"
+            printf "%s\n" "  resources:"
+            printf "%s\n" "    requests: { cpu: 20m, memory: 64Mi }"
+            printf "%s\n" "    limits:   { cpu: 200m, memory: 256Mi }"
+            printf "%s\n" ""
+            printf "%s\n" "identityTrustAnchorsPEM: |"
+            sed 's/^/  /' /tmp/linkerd-dev/trust-anchor.crt
+            printf "%s\n" "identity:"
+            printf "%s\n" "  issuer:"
+            printf "%s\n" "    scheme: kubernetes.io/tls"
+            printf "%s\n" "    tls:"
+            printf "%s\n" "      crtPEM: |"
+            sed 's/^/        /' /tmp/linkerd-dev/issuer.crt
+            printf "%s\n" "      keyPEM: |"
+            sed 's/^/        /' /tmp/linkerd-dev/issuer.key
+          } > helm-values/dev/control-plane-values.yaml
 
       - name: Commit dev values change (if any)
         if: ${{ (github.event.inputs.environment || 'dev') == 'dev' }}
@@ -73,7 +93,7 @@ jobs:
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add helm-values/dev/control-plane-values.yaml
-            git commit -m "ci(dev): auto-generate Linkerd identity certs"
+            git commit -m "ci(dev): generate Linkerd identity certs and values"
             git push origin "$DEFAULT_BRANCH"
           fi
 
@@ -87,7 +107,7 @@ jobs:
           kubectl apply -f argocd/apps/linkerd-control-plane-dev.yaml
           kubectl apply -f argocd/apps/linkerd-viz-dev.yaml
 
-      # STAGING/PROD: avoid unsupported 'upper()' by passing all secrets and selecting with case
+      # STAGING/PROD: choose secrets without using upper()
       - name: Deploy STAGING/PROD apps (inline values from secrets)
         if: ${{ (github.event.inputs.environment || 'dev') != 'dev' }}
         env:
@@ -99,7 +119,6 @@ jobs:
           PROD_CERT:    ${{ secrets.LINKERD_PROD_ISSUER_CERT_PEM }}
           PROD_KEY:     ${{ secrets.LINKERD_PROD_ISSUER_KEY_PEM }}
         run: |
-          # pick the right secret set
           case "$ENV" in
             staging) TRUST_ANCHOR="$STAGING_TA"; ISSUER_CERT="$STAGING_CERT"; ISSUER_KEY="$STAGING_KEY" ;;
             prod)    TRUST_ANCHOR="$PROD_TA";    ISSUER_CERT="$PROD_CERT";    ISSUER_KEY="$PROD_KEY"    ;;
@@ -131,7 +150,7 @@ jobs:
           sed -i "s/__ENV__/$ENV/g" /tmp/linkerd-crds-${ENV}.yaml
           kubectl apply -f /tmp/linkerd-crds-${ENV}.yaml
 
-          # Control plane with inline values (no secrets committed)
+          # Control plane with external CA and inline trust anchor (issuer Secret provided by certs/secrets in cluster)
           cat > /tmp/linkerd-control-plane-${ENV}.yaml <<APP
           apiVersion: argoproj.io/v1alpha1
           kind: Application
@@ -150,15 +169,20 @@ jobs:
                     installNamespace: false
                     controllerReplicas: $([ "$ENV" = "prod" ] && echo 3 || echo 2)
                     identity:
-                      externalCA: true
+                      externalCA: false
                       issuer:
                         scheme: kubernetes.io/tls
+                        tls:
+                          crtPEM: |
+          $(echo "$ISSUER_CERT" | sed 's/^/                            /')
+                          keyPEM: |
+          $(echo "$ISSUER_KEY" | sed 's/^/                            /')
+                    identityTrustAnchorsPEM: |
+          $(echo "$TRUST_ANCHOR" | sed 's/^/                    /')
                     proxy:
                       resources:
                         requests: { cpu: 50m, memory: 128Mi }
                         limits:   { cpu: 500m, memory: 512Mi }
-                    identityTrustAnchorsPEM: |
-          $(echo "$TRUST_ANCHOR" | sed 's/^/                    /')
             destination:
               server: https://kubernetes.default.svc
               namespace: linkerd
