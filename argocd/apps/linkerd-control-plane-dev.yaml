@@ -9,12 +9,17 @@ metadata:
 spec:
   project: platform-tools
   source:
-    repoURL: https://github.com/nolet7/linkered.git   # repo with your manifests/values
-    targetRevision: master                           # branch to deploy from
-    path: charts/linkerd-control-plane               # chart folder (adjust if needed)
+    repoURL: https://helm.linkerd.io/stable
+    chart: linkerd-control-plane
+    targetRevision: "*"
     helm:
       valueFiles:
-        - helm-values/dev/control-plane-values.yaml  # trustAnchorsPEM included here
+        - $values/helm-values/dev/control-plane-values.yaml
+    # Add your repo so $values works
+  sources:
+    - repoURL: https://github.com/nolet7/linkered.git
+      targetRevision: master
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: linkerd
@@ -26,4 +31,9 @@ spec:
       - CreateNamespace=true
       - Validate=true
       - ApplyOutOfSyncOnly=true
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
 

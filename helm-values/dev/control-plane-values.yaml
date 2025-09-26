@@ -1,9 +1,6 @@
-# Repo-scoped values merged into the Linkerd control-plane chart.
-
 installNamespace: false
 controllerReplicas: 1
 
-# REQUIRED: paste the trust anchor (root CA) PEM used to sign the issuer
 identityTrustAnchorsPEM: |-
   -----BEGIN CERTIFICATE-----
   MIIDMzCCAhugAwIBAgIUd0iw5LDHbBJC+mKyx7IR7PPkpBowDQYJKoZIhvcNAQEL
@@ -27,14 +24,9 @@ identityTrustAnchorsPEM: |-
   -----END CERTIFICATE-----
 
 identity:
-  # We’re using a Kubernetes Secret for the issuer, created + sealed earlier
   externalCA: true
   issuer:
-    scheme: kubernetes
-    tls:
-      crtPEM: ""
-      keyPEM: ""
-    # These values will be read from the Secret `linkerd-identity-issuer`
+    scheme: kubernetes.io/tls
     secretName: linkerd-identity-issuer
 
 proxy:
