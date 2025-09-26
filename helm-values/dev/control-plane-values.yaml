@@ -4,15 +4,31 @@ installNamespace: false
 controllerReplicas: 1
 
 # REQUIRED: paste the trust anchor (root CA) PEM used to sign the issuer
-identityTrustAnchorsPEM: |
+identityTrustAnchorsPEM: |-
   -----BEGIN CERTIFICATE-----
-  YOUR_TRUST_ANCHOR_PEM_HERE
+  MIIDQzCCAiugAwIBAgIUaqpNC13BBgJUO9xQsqEcJ4+Ab6EwDQYJKoZIhvcNAQEL
+  BQAwKTEnMCUGA1UEAwweaWRlbnRpdHkubGlua2VyZC5jbHVzdGVyLmxvY2FsMB4X
+  DTI1MDkyNjAwMjA0NVoXDTI2MDkyNjAwMjA0NVowKTEnMCUGA1UEAwweaWRlbnRp
+  dHkubGlua2VyZC5jbHVzdGVyLmxvY2FsMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+  MIIBCgKCAQEAzNhZ8kteK8lE0UuQaDd74mfcnd10j3qU3ov7mTjv0lFEuo8Y157A
+  IoiGl+D9pR8UYM7nVGOwxkGy9VLNngI8f0B/5cz+Cuq626oQTtxlQhWcPM+c5wkA
+  +7WrirYVnPqxWwBshVGAL8QJQ0f0BdLmQj7p0L3TF0UPq+mraIABlP9IIMg3LKBu
+  9bMgMlgUmBJzPwmTXDQnm66BOcYkxgOLB2pLg5E6WJ21cVnmNJVIElraKoSRNNqB
+  OZsIQ5uyijgbkfSBT4g935uMc4snyrPy2Do2Y58Gqfqr4efrCojPnc1m2zBvqX8z
+  DZlgfnv+slTat5pxA+rjIQzN6uFMWv7WaQIDAQABo2MwYTAPBgNVHRMBAf8EBTAD
+  AQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUFO2nJXEpfvz/MCCLS3kardA+
+  l20wHwYDVR0jBBgwFoAUFO2nJXEpfvz/MCCLS3kardA+l20wDQYJKoZIhvcNAQEL
+  BQADggEBAEoiiHquCePVTLKmS+3Cp3bnQW4g3CxjF35n7vMwjAwhSGA2ZriasfWC
+  rYLl87L59AWYcaShAAg66qfW/vnbQejYW7gyOaznmvjYKqRz/3vVLmwzx2QkXy+e
+  Nd7BAN7zVcKUUb+g0nih/c0WF4YFP5bc2mWGEEMQp7r4eFkrTk5EivpYL2fbUWBo
+  ArazEtXLpX3RRUw6ltK2pCzzRdujLHTKZ6a7SdliT2+8hNZQotj2A4YjuduOZoKz
+  tjGdw0GWEntT2+viDqbCaUxsEGYYJaa8dWiINPwggVPJ8L990MOhrOd2VxR9p9il
+  S5tAtO4r8/dz0ArjYFs+fe5E7eF0kPY=
   -----END CERTIFICATE-----
-
 identity:
   externalCA: true
   issuer:
-    scheme: kubernetes.io/tls
+    scheme: kubernetes
 
 proxy:
   resources:
