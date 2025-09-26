@@ -6,41 +6,43 @@ controllerReplicas: 1
 # REQUIRED: paste the trust anchor (root CA) PEM used to sign the issuer
 identityTrustAnchorsPEM: |-
   -----BEGIN CERTIFICATE-----
-MIIFMzCCAxugAwIBAgIUJN1WFqxsvdjypf9NVbX0sPeoTQ8wDQYJKoZIhvcNAQEL
-BQAwKTEnMCUGA1UEAwweaWRlbnRpdHkubGlua2VyZC5jbHVzdGVyLmxvY2FsMB4X
-DTI1MDkyNjE5MzE1NloXDTM1MDkyNDE5MzE1NlowKTEnMCUGA1UEAwweaWRlbnRp
-dHkubGlua2VyZC5jbHVzdGVyLmxvY2FsMIICIjANBgkqhkiG9w0BAQEFAAOCAg8A
-MIICCgKCAgEAw8Q7vrDXT3GQlkuaqOCWOpU1iCsh6zL37Ty3NRHYqi6H/e3O8urM
-r7NgHKaxjf0JfGDp2TlmixkOWww2JTOv60XsprN5mwHW3BLgrPmWqofKAJh/ZuTG
-HCSF3CNin7bggMXRWGbH1uPnRZtAKFp7BWkrZ85mCe7dWZKrvvpa+ea4fICPQqeQ
-iH4213u6uCRhi4jB4LEgY94qWoEZ2lHwjdudzsJdAINTRm1Q6PIO4O4N9DPl+Q7S
-oR4BS5oKeiXMM2INAxT0jrjXhYyotSMAHFBclQON1o5+TixcTnVfOvE6LhTIW+q9
-A9XvWiyFaFJbx7d6+ASZOsxtWeWA/uNYju4WeyUK0tPropJbT0QcURu1CZUTrD5X
-VqYOZo6RG/O+RdidGBoE3+oykruMgp0BXNO/GuTRjjrLS07iWKHLgs0/3dx/qZFU
-okYuNSJW8mVu2HPn691ALS35bxkSO9GbcUqKvi+icCr979BTVIk4+sKvkjui+mpx
-tNC5eJkDgYHT30/iIb3YNJnJyiKJ/Pc16COi34arbTQwAbmDiW9X3yxGAOXJChT9
-1zh04n8o3xTwQItGFOU77ZpkZG4xcZWd0zQyrMc453b8S8VW0HbFsGqYDtcLUdEX
-IxrTDhNBc9zw56ZrJQRRUnqeEYSmyj3f5SURkuAL5uSh0+r8dGCbpBECAwEAAaNT
-MFEwHQYDVR0OBBYEFCn422zROCbKUskXJaemjjqO5f8ZMB8GA1UdIwQYMBaAFCn4
-22zROCbKUskXJaemjjqO5f8ZMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL
-BQADggIBAD7Ifkv2b5KBo0EpY2Cx8TbhhH1g0U/Kg2nQK6l8salqBI/Q029Dktr8
-OQkOjySsPfbZEkgUf63A05P1ArxdsgSyXKoCoylAIcmHPYq1EDggGmxQhgZ0AXQM
-nnhWsXt0K+rcPrYcvMOfwRXdpy908CxCM7foT4mfv9t4JsK8mOyQ7EExTgpVkpPZ
-Roy7ojBHXEt2B7xWTEmLgCiaE+eBn1p0z641RaYB+/XGY7IUQ8LR6ER6UjKO/ibE
-RvS5r3oN52N1vv3ZJBq6Lrpv/IHsOEn0k66bFjC8+dr/y1nmWmKuRUtGuBo0GeEe
-o/4iGq9+gvlMOnPKPs0Tg1s6tTc9OLKknOrphChyCLjU9A8MbWYkj8DSOS5kabR2
-vfk9PIg0Pz2ySeo/2UHmatCPAt37xA1vSbC/DwyoUhxyBQJfxhRzXFhc3nS2RG16
-HnzQ4u4qzdrShQmSZ2gVbVywfCO3PYtLyQqxq2X457WGdhGxPQ5QJcJjlwO8mep3
-2DnEbFvv4IvfC6a3LQtC7MXX6F4QUoUOWd/OAiPlBkHouH9wM1ZQaCFcpOUuIPvt
-I+jelrMkOb4XXEjrMOOTG4Bq6TZBKlvLHyKxqj+jo7fla+LigAigPK69QS9AZOks
-1/8xk/H5UFBn7E+9Jv8kX+sl3HhInpS+bj6elLKBnpJQcJtgoU51
+  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
+  gGK0ltSOoA==
   -----END CERTIFICATE-----
+
 identity:
+  # We’re using a Kubernetes Secret for the issuer, created + sealed earlier
   externalCA: true
   issuer:
     scheme: kubernetes
+    tls:
+      crtPEM: ""
+      keyPEM: ""
+    # These values will be read from the Secret `linkerd-identity-issuer`
+    secretName: linkerd-identity-issuer
 
 proxy:
   resources:
-    requests: { cpu: 20m, memory: 64Mi }
-    limits:   { cpu: 200m, memory: 256Mi }
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
