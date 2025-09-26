@@ -3,57 +3,27 @@ kind: Application
 metadata:
   name: linkerd-control-plane-dev
   namespace: argocd
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/part-of: platform-tools
+    app.kubernetes.io/managed-by: argocd
 spec:
   project: platform-tools
-  sources:
-    # (optional) keep RBAC from your repo
-    - repoURL: https://github.com/nolet7/linkered
-      targetRevision: master
-      path: argocd/rbac
-
-    # The Linkerd control-plane Helm chart
-    - repoURL: https://helm.linkerd.io/stable
-      chart: linkerd-control-plane
-      targetRevision: "*"
-      helm:
-        # Merge the repo values file via a ref named "values"
-        valueFiles:
-          - $values/helm-values/dev/control-plane-values.yaml
-        # Inline base values (kept minimal; external CA mode)
-        values: |
-          installNamespace: false
-          controllerReplicas: 1
-          cniEnabled: false
-
-          identity:
-            externalCA: true
-            issuer:
-              scheme: kubernetes.io/tls
-
-          proxy:
-            resources:
-              requests: { cpu: 20m,  memory: 64Mi }
-              limits:   { cpu: 200m, memory: 256Mi }
-
-    # This ref exposes your repo so `$values/...` resolves
-    - repoURL: https://github.com/nolet7/linkered
-      targetRevision: master
-      ref: values
-
+  source:
+    repoURL: https://github.com/nolet7/linkered.git   # repo with your manifests/values
+    targetRevision: master                           # branch to deploy from
+    path: charts/linkerd-control-plane               # chart folder (adjust if needed)
+    helm:
+      valueFiles:
+        - helm-values/dev/control-plane-values.yaml  # trustAnchorsPEM included here
   destination:
     server: https://kubernetes.default.svc
     namespace: linkerd
-
   syncPolicy:
     automated:
-      selfHeal: true
       prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - Validate=true
+      - ApplyOutOfSyncOnly=true
 
-  ignoreDifferences:
-    - group: admissionregistration.k8s.io
-      kind: MutatingWebhookConfiguration
-      jqPathExpressions: [ ".webhooks[]?.clientConfig.caBundle" ]
