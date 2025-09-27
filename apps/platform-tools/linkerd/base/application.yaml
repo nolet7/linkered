@@ -14,19 +14,6 @@ spec:
         identity:
           issuer:
             scheme: kubernetes.io/tls
-            tls:
-              crtPEM: |
-                -----BEGIN CERTIFICATE-----
-                MIIBjjCCATSgAwIBAgIRAJBm7WoEomRboDBSK+X8v3QwCgYIKoZIzj0EAwIwJTEj
-                MCEGA1UEAxMacm9vdC5saW5rZXJkLmNsdXN0ZXIubG9jYWwwHhcNMjUwOTI3MDMw
-                OTU2WhcNMzUwOTI1MDMwOTU2WjAlMSMwIQYDVQQDExpyb290LmxpbmtlcmQuY2x1
-                c3Rlci5sb2NhbDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMA+ZICroChRXBiE
-                ICNXC/KiLItp0JQPpKg8gY7Egv3uqY02kXBMtWJ3QNZqOy/ussKSuCfwwdLRLvs9
-                kLqhns2jRTBDMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEBMB0G
-                A1UdDgQWBBQMh8diiVtWEy+A8bANMcq9PguvlzAKBggqhkjOPQQDAgNIADBFAiEA
-                rMApeu0o0to8aS3hoGnEaQURTtrdhpWFKTwLyTv57fcCIEjuZFJSbaMqzA5T6z+/
-                WUWc2jrPYNozHUJ+4escKbjN
-                -----END CERTIFICATE-----
           trustAnchorsPEM: |
             -----BEGIN CERTIFICATE-----
             MIIBjjCCATSgAwIBAgIRAJBm7WoEomRboDBSK+X8v3QwCgYIKoZIzj0EAwIwJTEj
