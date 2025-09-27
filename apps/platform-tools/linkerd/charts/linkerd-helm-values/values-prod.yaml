@@ -1,0 +1,5 @@
+identity:
+  issuer:
+    crtExpiry: 720h
+proxy:
+  logLevel: warn

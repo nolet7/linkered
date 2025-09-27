@@ -1,0 +1,4 @@
+apiVersion: v2
+name: linkerd-helm-values
+version: 0.1.0
+description: Helm values for Linkerd environments
