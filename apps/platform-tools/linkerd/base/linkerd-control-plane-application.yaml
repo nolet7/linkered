@@ -28,7 +28,6 @@ spec:
 
         identity:
           issuer:
-            scheme: kubernetes.io/tls
             tls:
               crtPEM: |
                 -----BEGIN CERTIFICATE-----
