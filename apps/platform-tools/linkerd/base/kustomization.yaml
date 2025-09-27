@@ -1,4 +1,4 @@
 resources:
   - application.yaml
   - namespace.yaml
-  - linkerd-identity-issuer.yaml
+  - linkerd-identity-issuer.sealed.yaml
