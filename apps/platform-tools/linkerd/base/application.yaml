@@ -14,7 +14,6 @@ spec:
         identity:
           issuer:
             scheme: kubernetes.io/tls
-          # Correct key name
           identityTrustAnchorsPEM: |
             -----BEGIN CERTIFICATE-----
             MIIBjjCCATSgAwIBAgIRAJBm7WoEomRboDBSK+X8v3QwCgYIKoZIzj0EAwIwJTEj
