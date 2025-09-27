@@ -13,7 +13,6 @@ spec:
       values: |
         installNamespace: false
 
-        # Root trust anchor (your CA)
         identityTrustAnchorsPEM: |
           -----BEGIN CERTIFICATE-----
           MIIBjjCCATSgAwIBAgIRAJBm7WoEomRboDBSK+X8v3QwCgYIKoZIzj0EAwIwJTEj
@@ -29,10 +28,27 @@ spec:
 
         identity:
           issuer:
-            # Tell Linkerd to read the issuer cert/key from the Secret
             scheme: kubernetes.io/tls
-            # Do NOT set crtPEM/keyPEM here when using kubernetes.io/tls
-
+            tls:
+              crtPEM: |
+                -----BEGIN CERTIFICATE-----
+                MIIBsjCCAVigAwIBAgIQMKO4G/cirlpQT0tFaotKljAKBggqhkjOPQQDAjAlMSMw
+                IQYDVQQDExpyb290LmxpbmtlcmQuY2x1c3Rlci5sb2NhbDAeFw0yNTA5MjcwMzA5
+                NTZaFw0zNTA5MjUwMzA5NTZaMCkxJzAlBgNVBAMTHmlkZW50aXR5LmxpbmtlcmQu
+                Y2x1c3Rlci5sb2NhbDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJ0nnDMrHEmd
+                9PKHQZjmqL1SMjJOwbJUAaBlv/O0KkpuoNfv8jgwEZL4u+XL9xeFT7kl95Imdj6P
+                xwsjZxEzOMyjZjBkMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEA
+                MB0GA1UdDgQWBBTfLbkNSHAOWy8LchEK6xYFVBaNlDAfBgNVHSMEGDAWgBQMh8di
+                iVtWEy+A8bANMcq9PguvlzAKBggqhkjOPQQDAgNIADBFAiBRrUk5pOSmp95Prcvg
+                5e6QCs65TBhiiK+vMHddWDwJfwIhAJyhmhiSzhZGdj/RyiJVGibDGqonEmN3Fc5i
+                /n8EXFwU
+                -----END CERTIFICATE-----
+              keyPEM: |
+                -----BEGIN EC PRIVATE KEY-----
+                MHcCAQEEIAb/4AqebrPT3j5ze7pN8lcxAgXdkNWSluM6bcygDhv3oAoGCCqGSM49
+                AwEHoUQDQgAEnSecMyscSZ308odBmOaovVIyMk7BslQBoGW/87QqSm6g1+/yODAR
+                kvi75cv3F4VPuSX3kiZ2Po/HCyNnETM4zA==
+                -----END EC PRIVATE KEY-----
   destination:
     server: https://kubernetes.default.svc
     namespace: linkerd
@@ -41,6 +57,6 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - Replace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - Replace=true
+      - ServerSideApply=true
