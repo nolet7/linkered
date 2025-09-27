@@ -5,44 +5,36 @@ metadata:
   namespace: argocd
 spec:
   project: platform-tools
-  sources:
-    # 1. Linkerd Helm chart (core control-plane)
-    - repoURL: https://helm.linkerd.io/stable
-      chart: linkerd-control-plane
-      targetRevision: 1.16.8
-      helm:
-        values: |
-          identity:
-            issuer:
-              # Tell Linkerd to use the Kubernetes TLS Secret (linkerd-identity-issuer)
-              scheme: kubernetes.io/tls
-            trustAnchorsPEM: |
-              -----BEGIN CERTIFICATE-----
-              MIIBjjCCATSgAwIBAgIRAJBm7WoEomRboDBSK+X8v3QwCgYIKoZIzj0EAwIwJTEj
-              MCEGA1UEAxMacm9vdC5saW5rZXJkLmNsdXN0ZXIubG9jYWwwHhcNMjUwOTI3MDMw
-              OTU2WhcNMzUwOTI1MDMwOTU2WjAlMSMwIQYDVQQDExpyb290LmxpbmtlcmQuY2x1
-              c3Rlci5sb2NhbDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMA+ZICroChRXBiE
-              ICNXC/KiLItp0JQPpKg8gY7Egv3uqY02kXBMtWJ3QNZqOy/ussKSuCfwwdLRLvs9
-              kLqhns2jRTBDMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEBMB0G
-              A1UdDgQWBBQMh8diiVtWEy+A8bANMcq9PguvlzAKBggqhkjOPQQDAgNIADBFAiEA
-              rMApeu0o0to8aS3hoGnEaQURTtrdhpWFKTwLyTv57fcCIEjuZFJSbaMqzA5T6z+/
-              WUWc2jrPYNozHUJ+4escKbjN
-              -----END CERTIFICATE-----
-          proxy:
-            resources:
-              requests:
-                cpu: 50m
-                memory: 64Mi
-              limits:
-                cpu: 200m
-                memory: 256Mi
-          enableHA: false
-
-    # 2. Your repo for secrets and trust-roots
-    - repoURL: https://github.com/nolet7/linkered.git
-      targetRevision: master
-      path: apps/platform-tools/linkerd/base
-
+  source:
+    repoURL: https://helm.linkerd.io/stable
+    chart: linkerd-control-plane
+    targetRevision: 1.16.8
+    helm:
+      values: |
+        identity:
+          issuer:
+            scheme: kubernetes.io/tls
+          trustAnchorsPEM: |
+            -----BEGIN CERTIFICATE-----
+            MIIBjjCCATSgAwIBAgIRAJBm7WoEomRboDBSK+X8v3QwCgYIKoZIzj0EAwIwJTEj
+            MCEGA1UEAxMacm9vdC5saW5rZXJkLmNsdXN0ZXIubG9jYWwwHhcNMjUwOTI3MDMw
+            OTU2WhcNMzUwOTI1MDMwOTU2WjAlMSMwIQYDVQQDExpyb290LmxpbmtlcmQuY2x1
+            c3Rlci5sb2NhbDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMA+ZICroChRXBiE
+            ICNXC/KiLItp0JQPpKg8gY7Egv3uqY02kXBMtWJ3QNZqOy/ussKSuCfwwdLRLvs9
+            kLqhns2jRTBDMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEBMB0G
+            A1UdDgQWBBQMh8diiVtWEy+A8bANMcq9PguvlzAKBggqhkjOPQQDAgNIADBFAiEA
+            rMApeu0o0to8aS3hoGnEaQURTtrdhpWFKTwLyTv57fcCIEjuZFJSbaMqzA5T6z+/
+            WUWc2jrPYNozHUJ+4escKbjN
+            -----END CERTIFICATE-----
+        proxy:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+        enableHA: false
   destination:
     namespace: linkerd
     server: https://kubernetes.default.svc
