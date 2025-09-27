@@ -8,7 +8,7 @@ spec:
   source:
     repoURL: https://helm.linkerd.io/stable
     chart: linkerd-crds
-    targetRevision: 1.16.8   # must match your linkerd chart version
+    targetRevision: 1.8.0   # must match your linkerd chart version
   destination:
     server: https://kubernetes.default.svc
     namespace: linkerd
